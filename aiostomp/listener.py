@@ -85,7 +85,7 @@ class ConnectionListener(object):
         """
         return headers, body
 
-    async def on_message(self, headers, body):
+    def on_message(self, headers, body):
         """
         Called by the STOMP connection when a MESSAGE frame is received.
 

@@ -4,27 +4,30 @@ import functools
 import logging
 import itertools
 import uuid
+from ssl import SSLContext
 from collections import deque, OrderedDict
 from typing import List, Dict, Union, Any, Optional, Deque, cast
 
-from .aiostomp import AioStompStats, AioStomp, AutoAckContextManager
+from .aiostomp import AioStomp
 from .constans import MESSAGE, CONNECTED, ERROR, CMD_SEND, CMD_ACK, CMD_NACK, HEARTBEAT, CMD_CONNECT, HDR_MESSAGE_ID, \
-    HDR_SUBSCRIPTION, CMD_SUBSCRIBE, CMD_UNSUBSCRIBE
+    HDR_SUBSCRIPTION, CMD_SUBSCRIBE, CMD_UNSUBSCRIBE, HDR_DESTINATION, HDR_ID, HDR_ACK
+from .ctx_manager import AutoAckContextManager
 from .errors import StompDisconnectedError, StompError
 from .heartbeat import StompHeartBeater
 from .frame import Frame
+from .stats import AioStompStats
 from .subscription import Subscription
 
-logger = logging.getLogger("aiostomp1.protocol")
+logger = logging.getLogger("aiostomp.protocol")
 
 
-class Stomp:
+class Amq:
     V1_0 = "1.0"
     V1_1 = "1.1"
     V1_2 = "1.2"
 
 
-class StompProtocol:
+class AmqProtocol:
 
     HEART_BEAT = b"\n"
     EOF = b"\x00"
@@ -47,7 +50,7 @@ class StompProtocol:
         self.headers: Dict[str, str] = {}
         self.current_command: Deque[int] = deque()
 
-        self._version = Stomp.V1_1
+        self._version = Amq.V1_1
 
     def _decode(self, byte_data: Union[str, bytes, bytearray]) -> str:
         try:
@@ -102,7 +105,7 @@ class StompProtocol:
 
     def _encode_header(self, header_value: Any) -> str:
         value = f"{header_value}"
-        if self._version == Stomp.V1_0:
+        if self._version == Amq.V1_0:
             return value
         return "".join(self.HEADER_MAP.get(c, c) for c in value)
 
@@ -248,15 +251,13 @@ def ends_with_crlf(data: Deque[int]) -> bool:
     size = len(data)
     ending = list(itertools.islice(data, size - 4, size))
 
-    return ending == StompProtocol.CRLFCRLR
+    return ending == AmqProtocol.CRLFCRLR
 
 
 class BaseProtocol(asyncio.Protocol):
     def __init__(self,
-                 frame_handler: AioStomp,
+                 frame_handler,
                  loop: asyncio.AbstractEventLoop,
-                 host: str,
-                 port: int,
                  heartbeat: Optional[Dict[str, Any]] = None,
                  username: Optional[str] = None,
                  password: Optional[str] = None,
@@ -281,7 +282,7 @@ class BaseProtocol(asyncio.Protocol):
         self._frames: Deque[bytes] = deque()
 
         self._transport: Optional[asyncio.Transport] = None
-        self._protocol = StompProtocol()
+        self._protocol = AmqProtocol()
         self._connect_headers: OrderedDict[str, str] = OrderedDict()
 
         self._connect_headers["accept-version"] = "1.1"
@@ -335,22 +336,6 @@ class BaseProtocol(asyncio.Protocol):
             self._stats.increment("sent_msg")
 
         self._transport.write(buf)
-
-    def ack(self, frame: Frame) -> None:
-        headers = OrderedDict({
-            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
-            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
-        })
-
-        return self.send_frame(CMD_ACK, headers)
-
-    def nack(self, frame: Frame) -> None:
-        headers = OrderedDict({
-            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
-            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
-        })
-
-        self.send_frame(CMD_NACK, headers)
 
     def connection_made(self, transport: asyncio.Transport) -> None:
         logger.info("Connected")
@@ -433,21 +418,99 @@ class BaseProtocol(asyncio.Protocol):
     def eof_received(self) -> None:
         self.connection_lost(Exception("Got EOF from server"))
 
-    def subscribe(self, subscription: Subscription):
 
+class StompProtocol:
+    def __init__(
+        self,
+        handler,
+        host: str,
+        port: int,
+        loop: asyncio.AbstractEventLoop,
+        heartbeat: Optional[Dict[str, Any]] = None,
+        ssl_context: Optional[SSLContext] = None,
+        client_id: Optional[str] = None,
+        stats: Optional[AioStompStats] = None,
+    ):
+
+        self.host = host
+        self.port = port
+        self.ssl_context = ssl_context
+        self.client_id = client_id
+        self._stats = stats
+
+        if loop is None:
+            loop = asyncio.get_event_loop()
+
+        self._loop = loop
+        self._heartbeat = heartbeat or {}
+        self._handler = handler
+        self._protocol: Optional[BaseProtocol] = None
+
+    async def connect(
+        self, username: Optional[str] = None, password: Optional[str] = None
+    ) -> None:
+        self._factory = functools.partial(
+            BaseProtocol,
+            self._handler,
+            username=username,
+            password=password,
+            client_id=self.client_id,
+            loop=self._loop,
+            heartbeat=self._heartbeat,
+            stats=self._stats,
+        )
+
+        trans, proto = await self._loop.create_connection(
+            self._factory, host=self.host, port=self.port, ssl=self.ssl_context
+        )
+
+        self._transport = trans
+        self._protocol = cast(BaseProtocol, proto)
+
+    def close(self) -> None:
+        if self._protocol:
+            self._protocol.close()
+
+    def subscribe(self, subscription: Subscription) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
         headers = OrderedDict({
-            "id": subscription.id,
-            "destination": subscription.destination,
-            "ack": subscription.ack,
+            HDR_ID: subscription.id,
+            HDR_DESTINATION: subscription.destination,
+            HDR_ACK: subscription.ack,
         })
         headers.update(subscription.extra_headers)
-        self.send_frame(CMD_SUBSCRIBE, headers)
 
-    def unsubscribe(self, subscription: Subscription):
+        self._protocol.send_frame(CMD_SUBSCRIBE, headers)
+
+    def unsubscribe(self, subscription: Subscription) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
         headers = OrderedDict({
-            "id": subscription.id,
-            "destination": subscription.destination
+            HDR_ID: subscription.id,
+            HDR_DESTINATION: subscription.destination
         })
-        self.send_frame(CMD_UNSUBSCRIBE, headers)
+        self._protocol.send_frame(CMD_UNSUBSCRIBE, headers)
 
-    send = send_frame
+    def send(self, headers: OrderedDict[str, Any], body: Union[bytes, str]) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        self._protocol.send_frame(CMD_SEND, headers, body)
+
+    def ack(self, frame: Frame) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        headers = OrderedDict({
+            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
+            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
+        })
+        self._protocol.send_frame(CMD_ACK, headers)
+
+    def nack(self, frame: Frame) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        headers = OrderedDict({
+            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
+            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
+        })
+        self._protocol.send_frame(CMD_NACK, headers)

@@ -1,84 +1,14 @@
 import asyncio
-import logging
-import os
-from typing import List, Dict, Optional, Any, Union
+from typing import Dict, Optional, Any, Union
 from ssl import SSLContext
-from .protocol import BaseProtocol, Frame
+from collections import OrderedDict
+
 from .errors import ExceededRetryCount
+from .stats import AioStompStats
 from .subscription import Subscription
-
-AIOSTOMP_ENABLE_STATS = bool(os.environ.get("AIOSTOMP_ENABLE_STATS", False))
-AIOSTOMP_STATS_INTERVAL = int(os.environ.get("AIOSTOMP_STATS_INTERVAL", 10))
-logger = logging.getLogger("aiostomp1")
-
-
-class AioStompStats:
-    def __init__(self) -> None:
-        self.connection_count = 0
-        self.interval = AIOSTOMP_STATS_INTERVAL
-        self.connection_stats: List[Dict[str, int]] = []
-
-    def print_stats(self) -> None:
-        logger.info("==== AioStomp Stats ====")
-        logger.info("Connections count: {}".format(self.connection_count))
-        logger.info(" con | sent_msg | rec_msg ")
-        for index, stats in enumerate(self.connection_stats):
-            logger.info(
-                " {:>3} | {:>8} | {:>7} ".format(
-                    index + 1, stats["sent_msg"], stats["rec_msg"]
-                )
-            )
-        logger.info("========================")
-
-    def new_connection(self) -> None:
-        self.connection_stats.insert(0, {"sent_msg": 0, "rec_msg": 0})
-
-        if len(self.connection_stats) > 5:
-            self.connection_stats.pop()
-
-    def increment(self, field: str) -> None:
-        if len(self.connection_stats) == 0:
-            self.new_connection()
-
-        if field not in self.connection_stats[0]:
-            self.connection_stats[0][field] = 1
-            return
-
-        self.connection_stats[0][field] += 1
-
-    async def run(self) -> None:
-        while True:
-            await asyncio.sleep(self.interval)
-            self.print_stats()
-
-
-class AutoAckContextManager:
-    def __init__(
-        self, protocol: "BaseProtocol", ack_mode: str = "auto", enabled: bool = True
-    ) -> None:
-        self.protocol = protocol
-        self.enabled = enabled
-        self.ack_mode = ack_mode
-        self.result = None
-        self.frame: Optional[Frame] = None
-
-    def __enter__(self) -> "AutoAckContextManager":
-        return self
-
-    def __exit__(
-        self, exc_type: type, exc_value: Exception, exc_traceback: Any
-    ) -> None:
-        if not self.enabled:
-            return
-
-        if not self.frame:
-            return
-
-        if self.ack_mode in ["client", "client-individual"]:
-            if self.result:
-                self.protocol.ack(self.frame)
-            else:
-                self.protocol.nack(self.frame)
+from .config import AIOSTOMP_ENABLE_STATS
+from .log import logger
+from .protocol import Frame, StompProtocol
 
 
 class AioStomp:
@@ -113,15 +43,15 @@ class AioStomp:
             self._stats = AioStompStats()
             self._stats_handler = self._loop.create_task(self._stats.run())
 
-        self._protocol = BaseProtocol(
+        self._protocol = StompProtocol(
             self,
-            self._loop,
             host,
             port,
             heartbeat=self._heartbeat,
             ssl_context=ssl_context,
             client_id=client_id,
             stats=self._stats,
+            loop=self._loop,
         )
         self._last_subscribe_id = 0
         self._subscriptions: Dict[str, Subscription] = {}
@@ -267,10 +197,10 @@ class AioStomp:
         self,
         destination: str,
         body: Union[str, bytes] = "",
-        headers: Optional[Dict[str, Any]] = None,
+        headers: Optional[OrderedDict[str, Any]] = None,
         send_content_length=True,
     ) -> None:
-        headers = headers or {}
+        headers = headers or OrderedDict()
         headers["destination"] = destination
 
         body_b = self._encode(body)
@@ -310,7 +240,3 @@ class AioStomp:
 
     def get(self, key: str) -> Optional[Subscription]:
         return self._subscriptions.get(key)
-
-
-
-
