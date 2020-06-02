@@ -1,6 +1,11 @@
 """The STOMP command and header name strings.
 """
 
+MESSAGE = "message"
+ERROR = "ERROR"
+HEARTBEAT = "HEARTBEAT"
+CONNECTED = "CONNECTED"
+
 HDR_ACCEPT_VERSION = "accept-version"
 HDR_ACK = "ack"
 HDR_CONTENT_LENGTH = "content-length"

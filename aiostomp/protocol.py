@@ -1,521 +1,453 @@
-"""Provides the 1.0, 1.1 and 1.2 protocol classes.
-"""
+# -*- coding:utf-8 -*-
+import asyncio
+import functools
+import logging
+import itertools
+import uuid
+from collections import deque, OrderedDict
+from typing import List, Dict, Union, Any, Optional, Deque, cast
 
-import aiostomp.utils as utils
-from aiostomp.exception import ConnectFailedException
-from aiostomp.listener import *
+from .aiostomp import AioStompStats, AioStomp, AutoAckContextManager
+from .constans import MESSAGE, CONNECTED, ERROR, CMD_SEND, CMD_ACK, CMD_NACK, HEARTBEAT, CMD_CONNECT, HDR_MESSAGE_ID, \
+    HDR_SUBSCRIPTION, CMD_SUBSCRIBE, CMD_UNSUBSCRIBE
+from .errors import StompDisconnectedError, StompError
+from .heartbeat import StompHeartBeater
+from .frame import Frame
+from .subscription import Subscription
 
-
-class Protocol10(ConnectionListener):
-    """
-    Represents version 1.0 of the protocol (see https://stomp.github.io/stomp-specification-1.0.html).
-
-    Most users should not instantiate the protocol directly. See :py:mod:`stomp.connect` for connection classes.
-
-    :param transport:
-    :param bool auto_content_length: Whether to calculate and send the content-length header automatically if it has not been set
-    """
-    def __init__(self, transport, auto_content_length=True):
-        self.transport = transport
-        self.auto_content_length = auto_content_length
-        transport.set_listener("protocol-listener", self)
-        self.version = "1.0"
-
-    def send_frame(self, cmd, headers=None, body=''):
-        """
-        Encode and send a stomp frame
-        through the underlying transport.
-
-        :param str cmd: the protocol command
-        :param dict headers: a map of headers to include in the frame
-        :param body: the content of the message
-        """
-        frame = utils.Frame(cmd, headers, body)
-        self.transport.transmit(frame)
-
-    def abort(self, transaction, headers=None, **keyword_headers):
-        """
-        Abort a transaction.
-
-        :param str transaction: the identifier of the transaction
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert transaction is not None, "'transaction' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_TRANSACTION] = transaction
-        self.send_frame(CMD_ABORT, headers)
-
-    def ack(self, id, transaction=None, receipt=None):
-        """
-        Acknowledge 'consumption' of a message by id.
-
-        :param str id: identifier of the message
-        :param str transaction: include the acknowledgement in the specified transaction
-        :param str receipt: the receipt id
-        """
-        assert id is not None, "'id' is required"
-        headers = {HDR_MESSAGE_ID: id}
-        if transaction:
-            headers[HDR_TRANSACTION] = transaction
-        if receipt:
-            headers[HDR_RECEIPT] = receipt
-        self.send_frame(CMD_ACK, headers)
-
-    def begin(self, transaction=None, headers=None, **keyword_headers):
-        """
-        Begin a transaction.
-
-        :param str transaction: the identifier for the transaction (optional - if not specified
-            a unique transaction id will be generated)
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-
-        :return: the transaction id
-        :rtype: str
-        """
-        headers = utils.merge_headers([headers, keyword_headers])
-        if not transaction:
-            transaction = utils.get_uuid()
-        headers[HDR_TRANSACTION] = transaction
-        self.send_frame(CMD_BEGIN, headers)
-        return transaction
-
-    def commit(self, transaction=None, headers=None, **keyword_headers):
-        """
-        Commit a transaction.
-
-        :param str transaction: the identifier for the transaction
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert transaction is not None, "'transaction' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_TRANSACTION] = transaction
-        self.send_frame(CMD_COMMIT, headers)
-
-    def connect(self, username=None, passcode=None, wait=False, headers=None, **keyword_headers):
-        """
-        Start a connection.
-
-        :param str username: the username to connect with
-        :param str passcode: the password used to authenticate with
-        :param bool wait: if True, wait for the connection to be established/acknowledged
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        cmd = CMD_CONNECT
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_ACCEPT_VERSION] = self.version
-
-        if username is not None:
-            headers[HDR_LOGIN] = username
-
-        if passcode is not None:
-            headers[HDR_PASSCODE] = passcode
-
-        self.send_frame(cmd, headers)
-
-        if wait:
-            self.transport.wait_for_connection()
-            if self.transport.connection_error:
-                raise ConnectFailedException()
-
-    def disconnect(self, receipt=None, headers=None, **keyword_headers):
-        """
-        Disconnect from the server.
-
-        :param str receipt: the receipt to use (once the server acknowledges that receipt, we're
-            officially disconnected; optional - if not specified a unique receipt id will
-            be generated)
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        if not self.transport.is_connected():
-            logging.debug("Not sending disconnect, already disconnected")
-            return
-        headers = utils.merge_headers([headers, keyword_headers])
-        rec = receipt or utils.get_uuid()
-        headers[HDR_RECEIPT] = rec
-        self.set_receipt(rec, CMD_DISCONNECT)
-        self.send_frame(CMD_DISCONNECT, headers)
-
-    def send(self, destination, body, content_type=None, headers=None, **keyword_headers):
-        """
-        Send a message to a destination.
-
-        :param str destination: the destination of the message (e.g. queue or topic name)
-        :param body: the content of the message
-        :param str content_type: the content type of the message
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert destination is not None, "'destination' is required"
-        assert body is not None, "'body' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_DESTINATION] = destination
-        if content_type:
-            headers[HDR_CONTENT_TYPE] = content_type
-        if self.auto_content_length and body and HDR_CONTENT_LENGTH not in headers:
-            headers[HDR_CONTENT_LENGTH] = len(body)
-        self.send_frame(CMD_SEND, headers, body)
-
-    def subscribe(self, destination, id=None, ack="auto", headers=None, **keyword_headers):
-        """
-        Subscribe to a destination.
-
-        :param str destination: the topic or queue to subscribe to
-        :param str id: a unique id to represent the subscription
-        :param str ack: acknowledgement mode, either auto, client, or client-individual
-            (see http://stomp.github.io/stomp-specification-1.2.html#SUBSCRIBE_ack_Header)
-            for more information
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert destination is not None, "'destination' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_DESTINATION] = destination
-        if id:
-            headers[HDR_ID] = id
-        headers[HDR_ACK] = ack
-        self.send_frame(CMD_SUBSCRIBE, headers)
-
-    def unsubscribe(self, destination=None, id=None, headers=None, **keyword_headers):
-        """
-        Unsubscribe from a destination by either id or the destination name.
-
-        :param str destination: the name of the topic or queue to unsubscribe from
-        :param str id: the unique identifier of the topic or queue to unsubscribe from
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert id is not None or destination is not None, "'id' or 'destination' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        if id:
-            headers[HDR_ID] = id
-        if destination:
-            headers[HDR_DESTINATION] = destination
-        self.send_frame(CMD_UNSUBSCRIBE, headers)
+logger = logging.getLogger("aiostomp1.protocol")
 
 
-class Protocol11(HeartbeatListener, ConnectionListener):
-    """
-    Represents version 1.1 of the protocol (see https://stomp.github.io/stomp-specification-1.1.html).
+class Stomp:
+    V1_0 = "1.0"
+    V1_1 = "1.1"
+    V1_2 = "1.2"
 
-    Most users should not instantiate the protocol directly. See :py:mod:`stomp.connect` for connection classes.
 
-    :param transport:
-    :param (int,int) heartbeats:
-    :param bool auto_content_length: Whether to calculate and send the content-length header automatically if it has not been set
-    :param float heart_beat_receive_scale: how long to wait for a heartbeat before timing out, as a scale factor of receive time
-    """
-    def __init__(self, transport, heartbeats=(0, 0), auto_content_length=True, heart_beat_receive_scale=1.5):
-        HeartbeatListener.__init__(self, transport, heartbeats, heart_beat_receive_scale)
-        self.transport = transport
-        self.auto_content_length = auto_content_length
-        transport.set_listener("protocol-listener", self)
-        self.version = "1.1"
+class StompProtocol:
 
-    def _escape_headers(self, headers):
-        """
-        :param dict(str,str) headers:
-        """
-        for key, val in headers.items():
-            try:
-                val = val.replace("\\", "\\\\").replace("\n", "\\n").replace(":", "\\c")
-            except:
-                pass
-            headers[key] = val
+    HEART_BEAT = b"\n"
+    EOF = b"\x00"
+    CRLFCRLR = [b"\r", b"\n", b"\r", b"\n"]
+    HEADER_MAP = {"\n": "\\n", ":": "\\c", "\\": "\\\\", "\r": "\\r"}
+    MAX_DATA_LENGTH = 1024 * 1024 * 100
+    MAX_COMMAND_LENGTH = 1024
 
-    def send_frame(self, cmd, headers=None, body=''):
-        """
-        Encode and send a stomp frame
-        through the underlying transport:
+    def __init__(self) -> None:
+        self._pending_parts: List[bytes] = []
+        self._frames_ready: List[Frame] = []
 
-        :param str cmd: the protocol command
-        :param dict headers: a map of headers to include in the frame
-        :param body: the content of the message
-        """
-        if cmd != CMD_CONNECT:
-            if headers is None:
-                headers = {}
-            self._escape_headers(headers)
-        frame = utils.Frame(cmd, headers, body)
-        self.transport.transmit(frame)
+        self.processed_headers = False
+        self.awaiting_command = True
+        self.read_length = 0
+        self.content_length = -1
+        self.previous_byte: Optional[bytes] = None
 
-    def abort(self, transaction, headers=None, **keyword_headers):
-        """
-        Abort a transaction.
+        self.action: Optional[str] = None
+        self.headers: Dict[str, str] = {}
+        self.current_command: Deque[int] = deque()
 
-        :param str transaction: the identifier of the transaction
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert transaction is not None, "'transaction' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_TRANSACTION] = transaction
-        self.send_frame(CMD_ABORT, headers)
+        self._version = Stomp.V1_1
 
-    def ack(self, id, subscription, transaction=None, receipt=None):
-        """
-        Acknowledge 'consumption' of a message by id.
+    def _decode(self, byte_data: Union[str, bytes, bytearray]) -> str:
+        try:
+            if isinstance(byte_data, (bytes, bytearray)):
+                return byte_data.decode("utf-8")
+            if isinstance(byte_data, str):
+                return byte_data
+            else:
+                raise TypeError("Must be bytes or string")
 
-        :param str id: identifier of the message
-        :param str subscription: the subscription this message is associated with
-        :param str transaction: include the acknowledgement in the specified transaction
-        :param str receipt: the receipt id
-        """
-        assert id is not None, "'id' is required"
-        assert subscription is not None, "'subscription' is required"
-        headers = {HDR_MESSAGE_ID: id, HDR_SUBSCRIPTION: subscription}
-        if transaction:
-            headers[HDR_TRANSACTION] = transaction
-        if receipt:
-            headers[HDR_RECEIPT] = receipt
-        self.send_frame(CMD_ACK, headers)
+        except UnicodeDecodeError:
+            logging.error("string was: %s", byte_data)
+            raise
 
-    def begin(self, transaction=None, headers=None, **keyword_headers):
-        """
-        Begin a transaction.
+    def _decode_header(self, header: bytes) -> str:
+        decoded = []
 
-        :param str transaction: the identifier for the transaction (optional - if not specified
-            a unique transaction id will be generated)
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
+        stream: Deque[int] = deque(header)
+        has_data = True
 
-        :return: the transaction id
-        :rtype: str
-        """
-        headers = utils.merge_headers([headers, keyword_headers])
-        if not transaction:
-            transaction = utils.get_uuid()
-        headers[HDR_TRANSACTION] = transaction
-        self.send_frame(CMD_BEGIN, headers)
-        return transaction
+        while has_data:
+            if not stream:
+                break
 
-    def commit(self, transaction=None, headers=None, **keyword_headers):
-        """
-        Commit a transaction.
+            _b = bytes([stream.popleft()])
+            if _b == b"\\":
+                if len(stream) == 0:
+                    decoded.append(_b)
+                else:
+                    _next = bytes([stream.popleft()])
+                    if _next == b"n":
+                        decoded.append(b"\n")
+                    elif _next == b"c":
+                        decoded.append(b":")
+                    elif _next == b"\\":
+                        decoded.append(b"\\")
+                    elif _next == b"r":
+                        decoded.append(b"\r")
+                    else:
+                        stream.appendleft(_next[0])
+                        decoded.append(_b)
+            else:
+                decoded.append(_b)
 
-        :param str transaction: the identifier for the transaction
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert transaction is not None, "'transaction' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_TRANSACTION] = transaction
-        self.send_frame(CMD_COMMIT, headers)
+        return self._decode(b"".join(decoded))
 
-    def connect(self, username=None, passcode=None, wait=False, headers=None, **keyword_headers):
-        """
-        Start a connection.
+    def _encode(self, value: Union[str, bytes]) -> bytes:
+        if isinstance(value, str):
+            return value.encode("utf-8")
 
-        :param str username: the username to connect with
-        :param str passcode: the password used to authenticate with
-        :param bool wait: if True, wait for the connection to be established/acknowledged
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        cmd = CMD_STOMP
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_ACCEPT_VERSION] = self.version
+        return value
 
-        if self.transport.vhost:
-            headers[HDR_HOST] = self.transport.vhost
+    def _encode_header(self, header_value: Any) -> str:
+        value = f"{header_value}"
+        if self._version == Stomp.V1_0:
+            return value
+        return "".join(self.HEADER_MAP.get(c, c) for c in value)
+
+    def reset(self) -> None:
+        self._frames_ready = []
+
+    def feed_data(self, inp: bytes) -> None:
+        read_size = len(inp)
+        data: Deque[int] = deque(inp)
+        i = 0
+
+        while i < read_size:
+            i += 1
+            b = bytes([data.popleft()])
+
+            if (
+                not self.processed_headers
+                and self.previous_byte == self.EOF
+                and b == self.EOF
+            ):
+                continue
+
+            if not self.processed_headers:
+                if self.awaiting_command and b == b"\n":
+                    self._frames_ready.append(
+                        Frame("HEARTBEAT", headers={}, body=None))
+                    continue
+                else:
+                    self.awaiting_command = False
+
+                self.current_command.append(b[0])
+                if b == b"\n" and (
+                    self.previous_byte == b"\n" or ends_with_crlf(
+                        self.current_command)):
+
+                    try:
+                        self.action = self._parse_action(self.current_command)
+                        self.headers = self._parse_headers(
+                            self.current_command)
+                        logger.debug("Parsed action %s", self.action)
+
+                        if (
+                            self.action in (CMD_SEND, MESSAGE, ERROR)
+                            and "content-length" in self.headers
+                        ):
+                            self.content_length = int(
+                                self.headers["content-length"])
+                        else:
+                            self.content_length = -1
+                    except Exception:
+                        self.current_command.clear()
+                        return
+
+                    self.processed_headers = True
+                    self.current_command.clear()
+            else:
+                if self.content_length == -1:
+                    if b == self.EOF:
+                        self.process_command()
+                    else:
+                        self.current_command.append(b[0])
+
+                        if len(self.current_command) > self.MAX_DATA_LENGTH:
+                            # error
+                            return
+                else:
+                    if self.read_length == self.content_length:
+                        self.process_command()
+                        self.read_length = 0
+                    else:
+                        self.read_length += 1
+                        self.current_command.append(b[0])
+
+            self.previous_byte = b
+
+    def process_command(self) -> None:
+        body: Optional[bytes] = bytes(self.current_command)
+        if body == b"":
+            body = None
+        frame = Frame(self.action or "", self.headers, body)
+        self._frames_ready.append(frame)
+
+        self.processed_headers = False
+        self.awaiting_command = True
+        self.content_length = -1
+        self.current_command.clear()
+
+    def _read_line(self, _input: Deque[int]) -> bytes:
+        result = []
+        line_end = False
+        while not line_end:
+            if not _input:
+                break
+            b = _input.popleft()
+            if b == b"\n"[0]:
+                line_end = True
+                break
+            result.append(b)
+
+        return bytes(result)
+
+    def _parse_action(self, data: Deque[int]) -> str:
+        action = self._read_line(data)
+        return self._decode(action)
+
+    def _parse_headers(self, data: Deque[int]) -> Dict[str, str]:
+        headers = {}
+        while True:
+            line = self._read_line(data)
+            if len(line) > 1:
+                name, value = line.split(b":", 1)
+                headers[self._decode(name)] = self._decode_header(value)
+            else:
+                break
+        return headers
+
+    def build_frame(
+        self,
+        command: str,
+        headers: Optional[OrderedDict[str, Any]] = None,
+        body: Union[bytes, str] = "",
+    ) -> bytes:
+        lines: List[Union[str, bytes]] = [command, "\n"]
+
+        if headers:
+            for key, value in headers.items():
+                lines.append(f"{key}:{self._encode_header(value)}\n")
+
+        lines.append("\n")
+        lines.append(body)
+        lines.append(self.EOF)
+
+        return b"".join(self._encode(line) for line in lines)
+
+    def pop_frames(self) -> List[Frame]:
+        frames = self._frames_ready
+        self._frames_ready = []
+
+        return frames
+
+
+def ends_with_crlf(data: Deque[int]) -> bool:
+    size = len(data)
+    ending = list(itertools.islice(data, size - 4, size))
+
+    return ending == StompProtocol.CRLFCRLR
+
+
+class BaseProtocol(asyncio.Protocol):
+    def __init__(self,
+                 frame_handler: AioStomp,
+                 loop: asyncio.AbstractEventLoop,
+                 host: str,
+                 port: int,
+                 heartbeat: Optional[Dict[str, Any]] = None,
+                 username: Optional[str] = None,
+                 password: Optional[str] = None,
+                 client_id: Optional[str] = None,
+                 stats: Optional[AioStompStats] = None):
+
+        self.handlers_map = {
+            MESSAGE: self._handle_message,
+            CONNECTED: self._handle_connect,
+            ERROR: self._handle_error,
+        }
+
+        self.heartbeat = heartbeat or {}
+        self.heartbeater: Optional[StompHeartBeater] = None
+
+        self._loop = loop
+        self._frame_handler = frame_handler
+        self._force_close = False
+        self._stats = stats
+
+        self._waiter = None
+        self._frames: Deque[bytes] = deque()
+
+        self._transport: Optional[asyncio.Transport] = None
+        self._protocol = StompProtocol()
+        self._connect_headers: OrderedDict[str, str] = OrderedDict()
+
+        self._connect_headers["accept-version"] = "1.1"
+
+        if client_id is not None:
+            unique_id = uuid.uuid4()
+            self._connect_headers["client-id"] = f"{client_id}-{unique_id}"
+
+        if self.heartbeat.get("enabled"):
+            self._connect_headers["heart-beat"] = "{},{}".format(
+                self.heartbeat.get("cx", 0), self.heartbeat.get("cy", 0)
+            )
 
         if username is not None:
-            headers[HDR_LOGIN] = username
+            self._connect_headers["login"] = username
 
-        if passcode is not None:
-            headers[HDR_PASSCODE] = passcode
+        if password is not None:
+            self._connect_headers["passcode"] = password
 
-        self.send_frame(cmd, headers)
+    def close(self) -> None:
+        # Close the transport only if already connection is made
+        if self._transport:
+            # Close the transport to stomp receiving any more data
+            self._transport.close()
 
-        if wait:
-            self.transport.wait_for_connection()
-            if self.transport.connection_error:
-                raise ConnectFailedException()
+        if self.heartbeater:
+            self.heartbeater.shutdown()
+            self.heartbeater = None
 
-    def disconnect(self, receipt=None, headers=None, **keyword_headers):
-        """
-        Disconnect from the server.
+    def connect(self) -> None:
+        buf = self._protocol.build_frame(
+            CMD_CONNECT, headers=self._connect_headers)
+        if not self._transport:
+            raise StompDisconnectedError()
+        self._transport.write(buf)
 
-        :param str receipt: the receipt to use (once the server acknowledges that receipt, we're
-            officially disconnected; optional - if not specified a unique receipt id will
-            be generated)
-        :param dict headers: a map of any additional headers the broker requires
-        :param keyword_headers: any additional headers the broker requires
-        """
-        if not self.transport.is_connected():
-            import traceback
-            traceback.print_stack()
-            logging.debug("Not sending disconnect, already disconnected")
-            return
-        headers = utils.merge_headers([headers, keyword_headers])
-        rec = receipt or utils.get_uuid()
-        headers[HDR_RECEIPT] = rec
-        self.set_receipt(rec, CMD_DISCONNECT)
-        self.send_frame(CMD_DISCONNECT, headers)
+    def send_frame(
+        self,
+        command: str,
+        headers: Optional[OrderedDict[str, Any]] = None,
+        body: Union[str, bytes] = b"",
+    ) -> None:
+        if headers is None:
+            headers = OrderedDict()
+        buf = self._protocol.build_frame(command, headers, body)
 
-    def nack(self, id, subscription, transaction=None, receipt=None, **keyword_headers):
-        """
-        Let the server know that a message was not consumed.
+        if not self._transport:
+            raise StompDisconnectedError()
 
-        :param str id: the unique id of the message to nack
-        :param str subscription: the subscription this message is associated with
-        :param str transaction: include this nack in a named transaction
-        :param str receipt: the receipt id
-        :param keyword_headers: any additional headers to send with the nack command
-        """
-        assert id is not None, "'id' is required"
-        assert subscription is not None, "'subscription' is required"
-        headers = {HDR_MESSAGE_ID: id, HDR_SUBSCRIPTION: subscription}
-        headers = utils.merge_headers([headers, keyword_headers])
-        if transaction:
-            headers[HDR_TRANSACTION] = transaction
-        if receipt:
-            headers[HDR_RECEIPT] = receipt
+        if self._stats:
+            self._stats.increment("sent_msg")
+
+        self._transport.write(buf)
+
+    def ack(self, frame: Frame) -> None:
+        headers = OrderedDict({
+            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
+            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
+        })
+
+        return self.send_frame(CMD_ACK, headers)
+
+    def nack(self, frame: Frame) -> None:
+        headers = OrderedDict({
+            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
+            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
+        })
+
         self.send_frame(CMD_NACK, headers)
 
-    def send(self, destination, body, content_type=None, headers=None, **keyword_headers):
-        """
-        Send a message to a destination in the messaging system (as per https://stomp.github.io/stomp-specification-1.2.html#SEND)
+    def connection_made(self, transport: asyncio.Transport) -> None:
+        logger.info("Connected")
+        self._transport = transport
 
-        :param str destination: the destination (such as a message queue - for example '/queue/test' - or a message topic)
-        :param body: the content of the message
-        :param str content_type: the MIME type of message
-        :param dict headers: additional headers to send in the message frame
-        :param keyword_headers: any additional headers the broker requires
-        """
-        assert destination is not None, "'destination' is required"
-        assert body is not None, "'body' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_DESTINATION] = destination
-        if content_type:
-            headers[HDR_CONTENT_TYPE] = content_type
-        if self.auto_content_length and body and HDR_CONTENT_LENGTH not in headers:
-            headers[HDR_CONTENT_LENGTH] = len(body)
-        self.send_frame(CMD_SEND, headers, body)
+        self.connect()
 
-    def subscribe(self, destination, id, ack="auto", headers=None, **keyword_headers):
-        """
-        Subscribe to a destination
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        logger.debug("connection lost")
 
-        :param str destination: the topic or queue to subscribe to
-        :param str id: the identifier to uniquely identify the subscription
-        :param str ack: either auto, client or client-individual (see https://stomp.github.io/stomp-specification-1.2.html#SUBSCRIBE for more info)
-        :param dict headers: a map of any additional headers to send with the subscription
-        :param keyword_headers: any additional headers to send with the subscription
-        """
-        assert destination is not None, "'destination' is required"
-        assert id is not None, "'id' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_DESTINATION] = destination
-        headers[HDR_ID] = id
-        headers[HDR_ACK] = ack
+        self._transport = None
+
+        if self.heartbeater:
+            self.heartbeater.shutdown()
+            self.heartbeater = None
+
+        self._frame_handler.connection_lost(exc)
+
+    async def _handle_connect(self, frame: Frame) -> None:
+        if self._transport is None:
+            return
+
+        heartbeat = frame.headers.get("heart-beat")
+        logger.debug("Expecting heartbeats: %s", heartbeat)
+        if heartbeat and self.heartbeat.get("enabled"):
+            sx, sy = (int(x) for x in heartbeat.split(","))
+
+            if sy:
+                interval = max(self.heartbeat.get("cx", 0), sy)
+                logger.debug("Sending heartbeats every %sms", interval)
+                self.heartbeater = StompHeartBeater(
+                    self._transport, interval=interval, loop=self._loop
+                )
+                await self.heartbeater.start()
+
+    async def _handle_message(self, frame: Frame) -> None:
+        key = frame.headers.get("subscription", "")
+
+        subscription = self._frame_handler.get(key)
+        if not subscription:
+            logger.warning("Subscribe %s not found", key)
+            return
+
+        if self._stats:
+            self._stats.increment("rec_msg")
+
+        with AutoAckContextManager(
+            self, ack_mode=subscription.ack, enabled=subscription.auto_ack
+        ) as ack_context:
+            result = await subscription.handler(frame, frame.body)
+
+            ack_context.frame = frame
+            ack_context.result = result
+
+    async def _handle_error(self, frame: Frame) -> None:
+        message = frame.headers.get("message")
+
+        logger.error("Received error: %s" % message)
+        logger.debug("Error details: %s" % frame.body)
+
+        if self._frame_handler._on_error:
+            await self._frame_handler._on_error(StompError(message, frame.body))
+
+    async def _handle_exception(self, frame: Frame) -> None:
+        logger.warning("Unhandled frame: %s", frame.command)
+
+    def data_received(self, data: Optional[bytes]) -> None:
+        if not data:
+            return
+
+        self._protocol.feed_data(data)
+
+        for frame in self._protocol.pop_frames():
+            if frame.command != HEARTBEAT:
+                self._loop.create_task(
+                    self.handlers_map.get(
+                        frame.command,
+                        self._handle_exception)(frame))
+
+    def eof_received(self) -> None:
+        self.connection_lost(Exception("Got EOF from server"))
+
+    def subscribe(self, subscription: Subscription):
+
+        headers = OrderedDict({
+            "id": subscription.id,
+            "destination": subscription.destination,
+            "ack": subscription.ack,
+        })
+        headers.update(subscription.extra_headers)
         self.send_frame(CMD_SUBSCRIBE, headers)
 
-    def unsubscribe(self, id, headers=None, **keyword_headers):
-        """
-        Unsubscribe from a destination by its unique identifier
-
-        :param str id: the unique identifier to unsubscribe from
-        :param dict headers: additional headers to send with the unsubscribe
-        :param keyword_headers: any additional headers to send with the subscription
-        """
-        assert id is not None, "'id' is required"
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_ID] = id
+    def unsubscribe(self, subscription: Subscription):
+        headers = OrderedDict({
+            "id": subscription.id,
+            "destination": subscription.destination
+        })
         self.send_frame(CMD_UNSUBSCRIBE, headers)
 
-
-class Protocol12(Protocol11):
-    """
-    Represents version 1.2 of the protocol (see https://stomp.github.io/stomp-specification-1.2.html).
-
-    Most users should not instantiate the protocol directly. See :py:mod:`stomp.connect` for connection classes.
-
-    :param transport:
-    :param (int,int) heartbeats:
-    :param bool auto_content_length: Whether to calculate and send the content-length header automatically if it has not been set
-    :param float heart_beat_receive_scale: how long to wait for a heartbeat before timing out, as a scale factor of receive time
-    """
-    def __init__(self, transport, heartbeats=(0, 0), auto_content_length=True, heart_beat_receive_scale=1.5):
-        Protocol11.__init__(self, transport, heartbeats, auto_content_length, heart_beat_receive_scale=heart_beat_receive_scale)
-        self.version = "1.2"
-
-    def _escape_headers(self, headers):
-        """
-        :param dict(str,str) headers:
-        """
-        for key, val in headers.items():
-            try:
-                val = val.replace("\\", "\\\\").replace("\n", "\\n").replace(":", "\\c").replace("\r", "\\r")
-            except:
-                pass
-            headers[key] = val
-
-    def ack(self, id, transaction=None, receipt=None):
-        """
-        Acknowledge 'consumption' of a message by id.
-
-        :param str id: identifier of the message
-        :param str transaction: include the acknowledgement in the specified transaction
-        :param str receipt: the receipt id
-        """
-        assert id is not None, "'id' is required"
-        headers = {HDR_ID: id}
-        if transaction:
-            headers[HDR_TRANSACTION] = transaction
-        if receipt:
-            headers[HDR_RECEIPT] = receipt
-        self.send_frame(CMD_ACK, headers)
-
-    def nack(self, id, transaction=None, receipt=None, **keyword_headers):
-        """
-        Let the server know that a message was not consumed.
-
-        :param str id: the unique id of the message to nack
-        :param str transaction: include this nack in a named transaction
-        :param str receipt: the receipt id
-        :param keyword_headers: any additional headers to send with the nack command
-        """
-        assert id is not None, "'id' is required"
-        headers = {HDR_ID: id}
-        headers = utils.merge_headers([headers, keyword_headers])
-        if transaction:
-            headers[HDR_TRANSACTION] = transaction
-        if receipt:
-            headers[HDR_RECEIPT] = receipt
-        self.send_frame(CMD_NACK, headers)
-
-    def connect(self, username=None, passcode=None, wait=False, headers=None, **keyword_headers):
-        """
-        Send a STOMP CONNECT frame. Differs from 1.0 and 1.1 versions in that the HOST header is enforced.
-
-        :param str username: optionally specify the login user
-        :param str passcode: optionally specify the user password
-        :param bool wait: wait for the connection to complete before returning
-        :param dict headers: a map of any additional headers to send with the subscription
-        :param keyword_headers: any additional headers to send with the subscription
-        """
-        cmd = CMD_STOMP
-        headers = utils.merge_headers([headers, keyword_headers])
-        headers[HDR_ACCEPT_VERSION] = self.version
-        headers[HDR_HOST] = self.transport.current_host_and_port[0]
-
-        if self.transport.vhost:
-            headers[HDR_HOST] = self.transport.vhost
-
-        if username is not None:
-            headers[HDR_LOGIN] = username
-
-        if passcode is not None:
-            headers[HDR_PASSCODE] = passcode
-
-        self.send_frame(cmd, headers)
-
-        if wait:
-            self.transport.wait_for_connection()
-            if self.transport.connection_error:
-                raise ConnectFailedException()
+    send = send_frame
