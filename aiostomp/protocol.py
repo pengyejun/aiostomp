@@ -6,11 +6,12 @@ import itertools
 import uuid
 from ssl import SSLContext
 from collections import deque, OrderedDict
-from typing import List, Dict, Union, Any, Optional, Deque, cast
+from typing import List, Dict, Union, Any, Optional, Deque, cast, OrderedDict as _OrderedDict
 
-from .aiostomp import AioStomp
+from .base import StompBaseProtocol, ConnectionListener, Publisher
 from .constans import MESSAGE, CONNECTED, ERROR, CMD_SEND, CMD_ACK, CMD_NACK, HEARTBEAT, CMD_CONNECT, HDR_MESSAGE_ID, \
-    HDR_SUBSCRIPTION, CMD_SUBSCRIBE, CMD_UNSUBSCRIBE, HDR_DESTINATION, HDR_ID, HDR_ACK
+    HDR_SUBSCRIPTION, CMD_SUBSCRIBE, CMD_UNSUBSCRIBE, HDR_DESTINATION, HDR_ID, HDR_ACK, HDR_HEARTBEAT, \
+    HDR_ACCEPT_VERSION
 from .ctx_manager import AutoAckContextManager
 from .errors import StompDisconnectedError, StompError
 from .heartbeat import StompHeartBeater
@@ -18,7 +19,9 @@ from .frame import Frame
 from .stats import AioStompStats
 from .subscription import Subscription
 
-logger = logging.getLogger("aiostomp.protocol")
+logger = logging.getLogger("aio_stomp.protocol")
+
+HandlerMap = {CONNECTED: "on_connected", HEARTBEAT: "on_heartbeat", MESSAGE: "on_message", ERROR: "on_error"}
 
 
 class Amq:
@@ -112,26 +115,22 @@ class AmqProtocol:
     def reset(self) -> None:
         self._frames_ready = []
 
-    def feed_data(self, inp: bytes) -> None:
-        read_size = len(inp)
-        data: Deque[int] = deque(inp)
+    def process_data(self, data: bytes) -> None:
+        read_size = len(data)
+        data: Deque[int] = deque(data)
         i = 0
 
         while i < read_size:
             i += 1
             b = bytes([data.popleft()])
 
-            if (
-                not self.processed_headers
-                and self.previous_byte == self.EOF
-                and b == self.EOF
-            ):
+            if not self.processed_headers and self.previous_byte == self.EOF and b == self.EOF:
                 continue
 
             if not self.processed_headers:
                 if self.awaiting_command and b == b"\n":
                     self._frames_ready.append(
-                        Frame("HEARTBEAT", headers={}, body=None))
+                        Frame(HEARTBEAT, headers={}, body=None))
                     continue
                 else:
                     self.awaiting_command = False
@@ -201,7 +200,6 @@ class AmqProtocol:
                 break
             b = _input.popleft()
             if b == b"\n"[0]:
-                line_end = True
                 break
             result.append(b)
 
@@ -222,17 +220,11 @@ class AmqProtocol:
                 break
         return headers
 
-    def build_frame(
-        self,
-        command: str,
-        headers: Optional[OrderedDict[str, Any]] = None,
-        body: Union[bytes, str] = "",
-    ) -> bytes:
+    def build_frame(self, command: str, headers: Dict[str, Any], body: Union[bytes, str] = "") -> bytes:
         lines: List[Union[str, bytes]] = [command, "\n"]
 
-        if headers:
-            for key, value in headers.items():
-                lines.append(f"{key}:{self._encode_header(value)}\n")
+        for key, value in headers.items():
+            lines.append(f"{key}:{self._encode_header(value)}\n")
 
         lines.append("\n")
         lines.append(body)
@@ -254,9 +246,133 @@ def ends_with_crlf(data: Deque[int]) -> bool:
     return ending == AmqProtocol.CRLFCRLR
 
 
+class StompProtocol(StompBaseProtocol, Publisher):
+    def __init__(
+        self,
+        handler,
+        host: str,
+        port: int,
+        loop: asyncio.AbstractEventLoop,
+        heartbeat: Optional[Dict[str, Any]] = None,
+        ssl_context: Optional[SSLContext] = None,
+        client_id: Optional[str] = None,
+        stats: Optional[AioStompStats] = None,
+        subscriptions: Dict[str, Subscription] = None
+    ):
+
+        self.host = host
+        self.port = port
+        self.ssl_context = ssl_context
+        self.client_id = client_id
+        self._stats = stats
+        self.subscriptions = subscriptions
+        if loop is None:
+            loop = asyncio.get_event_loop()
+        self.listener: Dict[str, ConnectionListener] = {}
+        self._loop = loop
+        self._heartbeat = heartbeat or {}
+        self._handler = handler
+        self._protocol: Optional[BaseProtocol] = None
+
+    async def connect(self, username: Optional[str] = None, password: Optional[str] = None) -> None:
+        self._factory = functools.partial(
+            BaseProtocol,
+            self,
+            username=username,
+            password=password,
+            client_id=self.client_id,
+            loop=self._loop,
+            heartbeat=self._heartbeat,
+            stats=self._stats,
+        )
+
+        trans, proto = await self._loop.create_connection(
+            self._factory, host=self.host, port=self.port, ssl=self.ssl_context
+        )
+
+        self._transport = trans
+        self._protocol = cast(BaseProtocol, proto)
+
+    def close(self) -> None:
+        if self._protocol:
+            self._protocol.close()
+
+    def subscribe(self, subscription: Subscription) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        headers = OrderedDict({
+            HDR_ACK: subscription.ack,
+            HDR_DESTINATION: subscription.destination,
+            HDR_ID: subscription.id,
+        })
+        headers.update(subscription.extra_headers)
+
+        self._protocol.send_frame(CMD_SUBSCRIBE, headers)
+
+    def unsubscribe(self, subscription: Subscription) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        headers = OrderedDict({
+            HDR_ID: subscription.id,
+            HDR_DESTINATION: subscription.destination
+        })
+        self._protocol.send_frame(CMD_UNSUBSCRIBE, headers)
+
+    def send(self, headers: _OrderedDict[str, Any], body: Union[bytes, str]) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        self._protocol.send_frame(CMD_SEND, headers, body)
+
+    def ack(self, frame: Frame) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        headers = OrderedDict({
+            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
+            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
+        })
+        self._protocol.send_frame(CMD_ACK, headers)
+
+    def nack(self, frame: Frame) -> None:
+        if self._protocol is None:
+            raise RuntimeError("Not connected")
+        headers = OrderedDict({
+            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
+            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
+        })
+        self._protocol.send_frame(CMD_NACK, headers)
+
+    def feed_data(self, frame: Frame):
+        for _, listener in self.listener.items():
+            method = HandlerMap.get(frame.command)
+            if method:
+                func = getattr(listener, method, None)
+                if asyncio.iscoroutinefunction(func):
+                    self._loop.create_task(func(frame))
+                else:
+                    func(frame)
+        subscription = self.subscriptions[frame.headers[HDR_SUBSCRIPTION]]
+        with AutoAckContextManager(
+            self, ack_mode=subscription.ack, enabled=subscription.auto_ack
+        ) as ack_context:
+            ack_context.frame = frame
+            ack_context.result = True
+
+    def connection_lost(self, exc: Optional[Exception]) -> None:
+        self._handler.connection_lost(exc)
+
+    def set_listener(self, name: str, listener: ConnectionListener) -> None:
+        self.listener[name] = listener
+
+    def remove_listener(self, name: str) -> None:
+        del self.listener[name]
+
+    def get_listener(self, name: str) -> ConnectionListener:
+        return self.listener[name]
+
+
 class BaseProtocol(asyncio.Protocol):
     def __init__(self,
-                 frame_handler,
+                 frame_handler: StompProtocol,
                  loop: asyncio.AbstractEventLoop,
                  heartbeat: Optional[Dict[str, Any]] = None,
                  username: Optional[str] = None,
@@ -272,27 +388,24 @@ class BaseProtocol(asyncio.Protocol):
 
         self.heartbeat = heartbeat or {}
         self.heartbeater: Optional[StompHeartBeater] = None
-
         self._loop = loop
         self._frame_handler = frame_handler
-        self._force_close = False
         self._stats = stats
 
-        self._waiter = None
         self._frames: Deque[bytes] = deque()
 
         self._transport: Optional[asyncio.Transport] = None
         self._protocol = AmqProtocol()
-        self._connect_headers: OrderedDict[str, str] = OrderedDict()
+        self._connect_headers: _OrderedDict[str, str] = OrderedDict()
 
-        self._connect_headers["accept-version"] = "1.1"
+        self._connect_headers[HDR_ACCEPT_VERSION] = "1.1"
 
         if client_id is not None:
             unique_id = uuid.uuid4()
             self._connect_headers["client-id"] = f"{client_id}-{unique_id}"
 
         if self.heartbeat.get("enabled"):
-            self._connect_headers["heart-beat"] = "{},{}".format(
+            self._connect_headers[HDR_HEARTBEAT] = "{},{}".format(
                 self.heartbeat.get("cx", 0), self.heartbeat.get("cy", 0)
             )
 
@@ -318,13 +431,10 @@ class BaseProtocol(asyncio.Protocol):
         if not self._transport:
             raise StompDisconnectedError()
         self._transport.write(buf)
+        print(buf)
 
-    def send_frame(
-        self,
-        command: str,
-        headers: Optional[OrderedDict[str, Any]] = None,
-        body: Union[str, bytes] = b"",
-    ) -> None:
+    def send_frame(self, command: str, headers: Optional[_OrderedDict[str, Any]] = None,
+                   body: Union[str, bytes] = b"",) -> None:
         if headers is None:
             headers = OrderedDict()
         buf = self._protocol.build_frame(command, headers, body)
@@ -336,6 +446,7 @@ class BaseProtocol(asyncio.Protocol):
             self._stats.increment("sent_msg")
 
         self._transport.write(buf)
+        print(buf)
 
     def connection_made(self, transport: asyncio.Transport) -> None:
         logger.info("Connected")
@@ -357,7 +468,7 @@ class BaseProtocol(asyncio.Protocol):
     async def _handle_connect(self, frame: Frame) -> None:
         if self._transport is None:
             return
-
+        print("hello")
         heartbeat = frame.headers.get("heart-beat")
         logger.debug("Expecting heartbeats: %s", heartbeat)
         if heartbeat and self.heartbeat.get("enabled"):
@@ -372,9 +483,9 @@ class BaseProtocol(asyncio.Protocol):
                 await self.heartbeater.start()
 
     async def _handle_message(self, frame: Frame) -> None:
-        key = frame.headers.get("subscription", "")
+        key = frame.headers.get(HDR_SUBSCRIPTION, "")
 
-        subscription = self._frame_handler.get(key)
+        subscription = self._frame_handler.subscriptions.get(key)
         if not subscription:
             logger.warning("Subscribe %s not found", key)
             return
@@ -382,135 +493,28 @@ class BaseProtocol(asyncio.Protocol):
         if self._stats:
             self._stats.increment("rec_msg")
 
-        with AutoAckContextManager(
-            self, ack_mode=subscription.ack, enabled=subscription.auto_ack
-        ) as ack_context:
-            result = await subscription.handler(frame, frame.body)
-
-            ack_context.frame = frame
-            ack_context.result = result
-
     async def _handle_error(self, frame: Frame) -> None:
         message = frame.headers.get("message")
 
         logger.error("Received error: %s" % message)
         logger.debug("Error details: %s" % frame.body)
 
-        if self._frame_handler._on_error:
-            await self._frame_handler._on_error(StompError(message, frame.body))
-
     async def _handle_exception(self, frame: Frame) -> None:
         logger.warning("Unhandled frame: %s", frame.command)
 
     def data_received(self, data: Optional[bytes]) -> None:
+        print("1111")
+        print(data)
         if not data:
             return
-
-        self._protocol.feed_data(data)
-
+        self._protocol.process_data(data)
         for frame in self._protocol.pop_frames():
-            if frame.command != HEARTBEAT:
-                self._loop.create_task(
-                    self.handlers_map.get(
-                        frame.command,
-                        self._handle_exception)(frame))
+            if frame.command == CONNECTED:
+                handle = self.handlers_map.get(frame.command)
+                if handle:
+                    print(frame)
+                    yield from handle(frame).__await__()
+            self._frame_handler.feed_data(frame)
 
     def eof_received(self) -> None:
         self.connection_lost(Exception("Got EOF from server"))
-
-
-class StompProtocol:
-    def __init__(
-        self,
-        handler,
-        host: str,
-        port: int,
-        loop: asyncio.AbstractEventLoop,
-        heartbeat: Optional[Dict[str, Any]] = None,
-        ssl_context: Optional[SSLContext] = None,
-        client_id: Optional[str] = None,
-        stats: Optional[AioStompStats] = None,
-    ):
-
-        self.host = host
-        self.port = port
-        self.ssl_context = ssl_context
-        self.client_id = client_id
-        self._stats = stats
-
-        if loop is None:
-            loop = asyncio.get_event_loop()
-
-        self._loop = loop
-        self._heartbeat = heartbeat or {}
-        self._handler = handler
-        self._protocol: Optional[BaseProtocol] = None
-
-    async def connect(
-        self, username: Optional[str] = None, password: Optional[str] = None
-    ) -> None:
-        self._factory = functools.partial(
-            BaseProtocol,
-            self._handler,
-            username=username,
-            password=password,
-            client_id=self.client_id,
-            loop=self._loop,
-            heartbeat=self._heartbeat,
-            stats=self._stats,
-        )
-
-        trans, proto = await self._loop.create_connection(
-            self._factory, host=self.host, port=self.port, ssl=self.ssl_context
-        )
-
-        self._transport = trans
-        self._protocol = cast(BaseProtocol, proto)
-
-    def close(self) -> None:
-        if self._protocol:
-            self._protocol.close()
-
-    def subscribe(self, subscription: Subscription) -> None:
-        if self._protocol is None:
-            raise RuntimeError("Not connected")
-        headers = OrderedDict({
-            HDR_ID: subscription.id,
-            HDR_DESTINATION: subscription.destination,
-            HDR_ACK: subscription.ack,
-        })
-        headers.update(subscription.extra_headers)
-
-        self._protocol.send_frame(CMD_SUBSCRIBE, headers)
-
-    def unsubscribe(self, subscription: Subscription) -> None:
-        if self._protocol is None:
-            raise RuntimeError("Not connected")
-        headers = OrderedDict({
-            HDR_ID: subscription.id,
-            HDR_DESTINATION: subscription.destination
-        })
-        self._protocol.send_frame(CMD_UNSUBSCRIBE, headers)
-
-    def send(self, headers: OrderedDict[str, Any], body: Union[bytes, str]) -> None:
-        if self._protocol is None:
-            raise RuntimeError("Not connected")
-        self._protocol.send_frame(CMD_SEND, headers, body)
-
-    def ack(self, frame: Frame) -> None:
-        if self._protocol is None:
-            raise RuntimeError("Not connected")
-        headers = OrderedDict({
-            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
-            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
-        })
-        self._protocol.send_frame(CMD_ACK, headers)
-
-    def nack(self, frame: Frame) -> None:
-        if self._protocol is None:
-            raise RuntimeError("Not connected")
-        headers = OrderedDict({
-            HDR_SUBSCRIPTION: frame.headers[HDR_SUBSCRIPTION],
-            HDR_MESSAGE_ID: frame.headers[HDR_MESSAGE_ID],
-        })
-        self._protocol.send_frame(CMD_NACK, headers)

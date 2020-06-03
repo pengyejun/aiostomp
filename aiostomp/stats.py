@@ -3,6 +3,7 @@ from typing import Dict, List
 from .config import AIOSTOMP_STATS_INTERVAL
 from .log import logger
 
+
 class AioStompStats:
     def __init__(self) -> None:
         self.connection_count = 0

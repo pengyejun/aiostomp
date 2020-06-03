@@ -1,17 +1,18 @@
 import asyncio
-from typing import Dict, Optional, Any, Union
-from ssl import SSLContext
+from typing import Dict, Optional, Any, Union, OrderedDict as _OrderedDict
 from collections import OrderedDict
+from ssl import SSLContext
 
-from .errors import ExceededRetryCount
+from .base import ConnectionListener, Publisher
 from .stats import AioStompStats
 from .subscription import Subscription
 from .config import AIOSTOMP_ENABLE_STATS
 from .log import logger
-from .protocol import Frame, StompProtocol
+from .frame import Frame
+from .protocol import StompProtocol
 
 
-class AioStomp:
+class AioStomp(Publisher):
     def __init__(
         self,
         host: str,
@@ -23,7 +24,6 @@ class AioStomp:
         heartbeat: bool = True,
         heartbeat_interval_cx: int = 1000,
         heartbeat_interval_cy: int = 1000,
-        error_handler=None,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
 
@@ -42,19 +42,20 @@ class AioStomp:
         if AIOSTOMP_ENABLE_STATS:
             self._stats = AioStompStats()
             self._stats_handler = self._loop.create_task(self._stats.run())
+        self._subscriptions: Dict[str, Subscription] = {}
 
         self._protocol = StompProtocol(
             self,
             host,
             port,
+            self._loop,
             heartbeat=self._heartbeat,
             ssl_context=ssl_context,
             client_id=client_id,
             stats=self._stats,
-            loop=self._loop,
+            subscriptions=self._subscriptions
         )
         self._last_subscribe_id = 0
-        self._subscriptions: Dict[str, Subscription] = {}
 
         self._connected = False
         self._closed = False
@@ -67,8 +68,6 @@ class AioStomp:
         self._reconnect_max_attempts = reconnect_max_attempts
         self._reconnect_timeout = reconnect_timeout / 1000.0
         self._reconnect_attempts = 0
-
-        self._on_error = error_handler
 
     async def connect(
         self, username: Optional[str] = None, password: Optional[str] = None
@@ -125,10 +124,6 @@ class AioStomp:
                     await asyncio.sleep(self._retry_interval)
                 else:
                     logger.error("All connections attempts failed.")
-                    if self._on_error:
-                        asyncio.ensure_future(
-                            self._on_error(ExceededRetryCount(self)), loop=self._loop
-                        )
                     break
 
                 self._increment_retry_interval()
@@ -159,7 +154,6 @@ class AioStomp:
         destination: str,
         ack: str = "auto",
         extra_headers=None,
-        handler=None,
         auto_ack=True,
     ) -> Subscription:
         extra_headers = extra_headers or {}
@@ -170,7 +164,6 @@ class AioStomp:
             id=self._last_subscribe_id,
             ack=ack,
             extra_headers=extra_headers,
-            handler=handler,
             auto_ack=auto_ack,
         )
 
@@ -197,7 +190,7 @@ class AioStomp:
         self,
         destination: str,
         body: Union[str, bytes] = "",
-        headers: Optional[OrderedDict[str, Any]] = None,
+        headers: Optional[_OrderedDict[str, Any]] = None,
         send_content_length=True,
     ) -> None:
         headers = headers or OrderedDict()
@@ -240,3 +233,12 @@ class AioStomp:
 
     def get(self, key: str) -> Optional[Subscription]:
         return self._subscriptions.get(key)
+
+    def set_listener(self, name: str, listener: ConnectionListener) -> None:
+        self._protocol.set_listener(name, listener)
+
+    def remove_listener(self, name: str) -> None:
+        self._protocol.remove_listener(name)
+
+    def get_listener(self, name: str) -> ConnectionListener:
+        return self._protocol.get_listener(name)

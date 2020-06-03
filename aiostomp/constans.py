@@ -1,7 +1,7 @@
 """The STOMP command and header name strings.
 """
 
-MESSAGE = "message"
+MESSAGE = "MESSAGE"
 ERROR = "ERROR"
 HEARTBEAT = "HEARTBEAT"
 CONNECTED = "CONNECTED"

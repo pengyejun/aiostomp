@@ -1,3 +1,3 @@
 import logging
 
-logger = logging.getLogger("aiostomp")
+logger = logging.getLogger("aio_stomp")

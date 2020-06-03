@@ -1,12 +1,12 @@
 from typing import Any, Optional
 
-from aiostomp.frame import Frame
-# from aiostomp.protocol import StompProtocol
+from .base import StompBaseProtocol
+from .frame import Frame
 
 
 class AutoAckContextManager:
     def __init__(
-        self, protocol: "StompProtocol", ack_mode: str = "auto", enabled: bool = True
+        self, protocol: "StompBaseProtocol", ack_mode: str = "auto", enabled: bool = True
     ) -> None:
         self.protocol = protocol
         self.enabled = enabled
@@ -17,8 +17,7 @@ class AutoAckContextManager:
     def __enter__(self) -> "AutoAckContextManager":
         return self
 
-    def __exit__(
-        self, exc_type: type, exc_value: Exception, exc_traceback: Any) -> None:
+    def __exit__(self, exc_type: type, exc_value: Exception, exc_traceback: Any) -> None:
         if not self.enabled:
             return
 
