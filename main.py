@@ -1,4 +1,6 @@
 import sys
+import uvloop
+import time
 import logging
 import asyncio
 
@@ -13,10 +15,14 @@ from aiostomp.base import ConnectionListener
 logging.basicConfig(
     format="%(asctime)s - %(filename)s:%(lineno)d - "
     "%(levelname)s - %(message)s",
-    level='DEBUG')
+    level='INFO')
 
 
 class Listener(ConnectionListener):
+
+    def __init__(self):
+        self.index = 0
+
     def on_connected(self, frame: Frame):
         pass
 
@@ -24,32 +30,51 @@ class Listener(ConnectionListener):
         pass
 
     async def on_message(self, frame: Frame):
-        data = ujson.loads(frame.body)
-        print(data)
+        await asyncio.sleep(0.001)
+        # print(frame)
+        self.index += 1
+        if self.index % 100000 == 0:
+            print(time.time() - self.t)
+            print(self.index)
+        return
+        # data = frame.body.decode("utf-8", errors="replace")
+        # print(data)
+        # ujson.loads(data)
+        # print(data)
 
     async def on_error(self, frame: Frame):
         pass
 
 
+body = {'seq': 'collector1-1591240680008', 'tid': 'patrol_policy_2_2bd91c24-47af-4cbf-a01a-62169cb30003_useable_state',
+        'tm': 1591240692017, 'cost': 12014, 'ne': '2bd91c24-47af-4cbf-a01a-62169cb30003', 'ind': 'useable_state',
+        'v': False, 'type': 'Value'}
+
+
 async def run():
-    client = AioStomp("192.168.1.197", 61613)
-    client.subscribe("/topic/SIMO_IND_V_TO_RULE")
-    client.set_listener("abc", Listener())
+    client = AioStomp("127.0.0.1", 61613)
     await client.connect(username="admin", password="admin")
-    # client.send('/queue/channel', body=u'Thanks', headers={})
-
-
-async def on_message(frame, message):
-    print('on_message:', message)
-    return True
-
-
-async def report_error(error):
-    print('report_error:', error)
+    client.subscribe("/queue/channel")
+    l = Listener()
+    client.set_listener("abc", l)
+    i = 1000000
+    t1 = time.time()
+    l.t = t1
+    # while i > 0:
+    #     client.send('/queue/channel', body=f"{body}")
+        # await asyncio.sleep(0)
+        # i -= 1
+    # print(time.time() - t1)
+    # while True:
+    #     if l.index >= 100000:
+    #         print(time.time() - t1)
+    #         print(l.index)
+    #     await asyncio.sleep(0)
 
 
 def main(args):
-    loop = asyncio.get_event_loop()
+    loop = uvloop.new_event_loop()
+    asyncio.set_event_loop(loop)
     loop.run_until_complete(run())
     loop.run_forever()
 

@@ -1,5 +1,6 @@
+import asyncio
 from abc import abstractmethod
-from typing import Optional
+from typing import Optional, List, Any, Union, Dict
 
 from .frame import Frame
 
@@ -188,3 +189,58 @@ class Publisher(object):
 
         :rtype: ConnectionListener
         """
+
+
+class BaseProtocol:
+
+    def __init__(self):
+        self._recvbuf = b""
+        # : List[Frame]
+        self.__ready_frames = []
+
+    @abstractmethod
+    def process_data(self, data: bytes):
+        """
+        process data
+        """
+
+    @abstractmethod
+    def consume_data(self):
+        """
+        process recvbuf
+        """
+
+    @abstractmethod
+    def parse_frame(self, data: bytes) -> Frame:
+        """
+        bytes -> Frame
+        """
+
+    def pop_frames(self) -> List[Frame]:
+        """
+            clear and return ready_frames
+        """
+        frames = self.__ready_frames
+        self.__ready_frames = []
+        return frames
+
+    @abstractmethod
+    def parse_headers(self, lines: List[str], offset: int = 0) -> Dict[str, str]:
+        """
+        parse headers
+        """
+
+    @abstractmethod
+    def _encode_header(self, header_value: Any) -> str:
+        """
+        encode header
+        """
+
+    @abstractmethod
+    def build_frame(self, command: str, headers: Dict[str, Any], body: Union[bytes, str] = "") -> bytes:
+        """
+        build frame
+        """
+
+    def append_frame(self, frame: Frame):
+        self.__ready_frames.append(frame)

@@ -1,6 +1,5 @@
 import asyncio
-from typing import Dict, Optional, Any, Union, OrderedDict as _OrderedDict
-from collections import OrderedDict
+from typing import Dict, Optional, Any, Union
 from ssl import SSLContext
 
 from .base import ConnectionListener, Publisher
@@ -10,6 +9,7 @@ from .config import AIOSTOMP_ENABLE_STATS
 from .log import logger
 from .frame import Frame
 from .protocol import StompProtocol
+from .utils import encode
 
 
 class AioStomp(Publisher):
@@ -181,22 +181,17 @@ class AioStomp(Publisher):
             self._protocol.unsubscribe(subscription)
             del self._subscriptions[subscription_id]
 
-    def _encode(self, value: Union[str, bytes]) -> bytes:
-        if isinstance(value, str):
-            return value.encode("utf-8")
-        return value
-
     def send(
         self,
         destination: str,
         body: Union[str, bytes] = "",
-        headers: Optional[_OrderedDict[str, Any]] = None,
+        headers: Optional[Dict[str, Any]] = None,
         send_content_length=True,
     ) -> None:
-        headers = headers or OrderedDict()
+        headers = headers or {}
         headers["destination"] = destination
 
-        body_b = self._encode(body)
+        body_b = encode(body)
 
         # ActiveMQ determines the type of a message by the
         # inclusion of the content-length header
