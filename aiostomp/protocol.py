@@ -258,13 +258,15 @@ class StompProtocol(StompBaseProtocol, Publisher):
         ssl_context: Optional[SSLContext] = None,
         client_id: Optional[str] = None,
         stats: Optional[AioStompStats] = None,
-        subscriptions: Dict[str, Subscription] = None
+        subscriptions: Dict[str, Subscription] = None,
+        auto_decode: bool = True,
     ):
 
         self.host = host
         self.port = port
         self.ssl_context = ssl_context
         self.client_id = client_id
+        self.auto_decode = auto_decode
         self._stats = stats
         self.subscriptions = subscriptions
         if loop is None:
@@ -373,6 +375,7 @@ class BaseProtocol(asyncio.Protocol):
                  username: Optional[str] = None,
                  password: Optional[str] = None,
                  client_id: Optional[str] = None,
+                 auto_decode: bool = True,
                  stats: Optional[AioStompStats] = None):
 
         self.handlers_map = {
@@ -387,7 +390,7 @@ class BaseProtocol(asyncio.Protocol):
         self._frame_handler = frame_handler
         self._stats = stats
         self._transport: Optional[asyncio.Transport] = None
-        self._protocol = AmqProtocol()
+        self._protocol = AmqProtocol(auto_decode)
         self._connect_headers: Dict[str, str] = dict()
 
         self._connect_headers[HDR_ACCEPT_VERSION] = "1.1"

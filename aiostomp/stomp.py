@@ -24,6 +24,7 @@ class AioStomp(Publisher):
         heartbeat: bool = True,
         heartbeat_interval_cx: int = 1000,
         heartbeat_interval_cy: int = 1000,
+        auto_decode: bool = True,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
 
@@ -53,7 +54,8 @@ class AioStomp(Publisher):
             ssl_context=ssl_context,
             client_id=client_id,
             stats=self._stats,
-            subscriptions=self._subscriptions
+            subscriptions=self._subscriptions,
+            auto_decode=auto_decode,
         )
         self._last_subscribe_id = 0
 

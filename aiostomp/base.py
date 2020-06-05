@@ -193,10 +193,10 @@ class Publisher(object):
 
 class BaseProtocol:
 
-    def __init__(self):
+    def __init__(self, auto_decode=True):
         self._recvbuf = b""
-        # : List[Frame]
-        self.__ready_frames = []
+        self.auto_decode = auto_decode
+        self.__ready_frames: List[Frame] = []
 
     @abstractmethod
     def process_data(self, data: bytes):

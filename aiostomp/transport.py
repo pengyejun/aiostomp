@@ -87,7 +87,7 @@ class AmqProtocol(BaseProtocol):
         if first_line >= preamble_len:
             return None
         f = Frame(preamble_lines[first_line])
-        f.body = data[body_start:]
+        f.body = decode(data[body_start:]) if self.auto_decode else data[body_start:]
         f.headers = self.parse_headers(preamble_lines, first_line + 1)
         return f
 
