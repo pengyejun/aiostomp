@@ -1,6 +1,6 @@
 import asyncio
 import os
-from typing import Dict, Optional, Any, Union
+from typing import Dict, Optional, Any, Union, Tuple
 from ssl import SSLContext
 
 from .base import ConnectionListener, Publisher
@@ -21,16 +21,14 @@ class AioStomp(Publisher):
         client_id: Optional[str] = None,
         reconnect_max_attempts: int = -1,
         reconnect_timeout: int = 1000,
-        heartbeat: bool = True,
-        heartbeat_interval_cx: int = 1000,
-        heartbeat_interval_cy: int = 1000,
+        heartbeat_enable: bool = True,
+        heartbeat: Tuple[int, int] = (1000, 1000),
         auto_decode: bool = True,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
         self._heartbeat = {
-            "enabled": heartbeat,
-            "cx": heartbeat_interval_cx,
-            "cy": heartbeat_interval_cy,
+            "enabled": heartbeat_enable,
+            "heartbeat": heartbeat,
         }
 
         self._host = host

@@ -1,4 +1,6 @@
 import os
+
+import ujson
 import uvloop
 import logging
 import asyncio
@@ -10,7 +12,7 @@ from aiopystomp import AioStomp
 from aiopystomp.base import ConnectionListener
 
 
-os.environ["AIOSTOMP_ENABLE_STATS"] = "1"
+# os.environ["AIOSTOMP_ENABLE_STATS"] = "1"
 
 
 logging.basicConfig(
@@ -25,13 +27,10 @@ class Listener(ConnectionListener):
         pass
 
     def on_heartbeat(self, frame: Frame):
-        pass
+        print(frame)
 
     async def on_message(self, frame: Frame):
-        pass
-        # print(frame)
-        # frame.body = ujson.loads(frame.body)
-        # print(self.index)
+        print(ujson.loads(frame.body))
 
     async def on_error(self, frame: Frame):
         pass
