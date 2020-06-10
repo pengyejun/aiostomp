@@ -1,7 +1,6 @@
 # -*- coding:utf-8 -*-
 import asyncio
 import functools
-import logging
 import uuid
 from ssl import SSLContext
 from typing import Dict, Union, Any, Optional, cast

@@ -1,7 +1,5 @@
 import os
-import sys
 import uvloop
-import time
 import logging
 import asyncio
 
@@ -22,9 +20,6 @@ logging.basicConfig(
 
 
 class Listener(ConnectionListener):
-
-    def __init__(self, index):
-        self.index = index
 
     def on_connected(self, frame: Frame):
         pass
@@ -48,28 +43,25 @@ body = '{"seq":"collector1-1591240680008","tid":"patrol_policy_2_2bd91c24-47af-4
 
 
 async def send(client):
-    t1 = time.time()
     i = 1000000
     while i > 0:
         client.send('/queue/channel', body=f"{body}")
         if i % 200000 == 0:
             await asyncio.sleep(0)
-        i -= 1
-    print(time.time() - t1)
 
 
 async def run():
     client = AioStomp("127.0.0.1", 61613)
     await client.connect(username="admin", password="admin")
     client.subscribe("/queue/channel")
-    l = Listener(0)
-    l1 = Listener(1)
+    l = Listener()
+    l1 = Listener()
     client.set_listener("abc", l)
     client.set_listener("abc1", l1)
     # await send(client)
 
 
-def main(args):
+def main():
     loop = uvloop.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(run())
@@ -77,4 +69,4 @@ def main(args):
 
 
 if __name__ == '__main__':
-    main(sys.argv)
+    main()
