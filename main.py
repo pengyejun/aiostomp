@@ -1,16 +1,19 @@
+import os
 import sys
 import uvloop
 import time
 import logging
 import asyncio
-import aioelasticsearch
-import ujson
 
-from aiostomp.frame import Frame
+from aiostomp_py.frame import Frame
 
-from aiostomp import AioStomp
+from aiostomp_py import AioStomp
 
-from aiostomp.base import ConnectionListener
+from aiostomp_py.base import ConnectionListener
+
+
+os.environ["AIOSTOMP_ENABLE_STATS"] = "1"
+
 
 logging.basicConfig(
     format="%(asctime)s - %(filename)s:%(lineno)d - "
@@ -20,8 +23,8 @@ logging.basicConfig(
 
 class Listener(ConnectionListener):
 
-    def __init__(self):
-        self.index = 0
+    def __init__(self, index):
+        self.index = index
 
     def on_connected(self, frame: Frame):
         pass
@@ -30,8 +33,10 @@ class Listener(ConnectionListener):
         pass
 
     async def on_message(self, frame: Frame):
-        frame.body = ujson.loads(frame.body)
-        print(frame)
+        pass
+        # print(frame)
+        # frame.body = ujson.loads(frame.body)
+        # print(self.index)
 
     async def on_error(self, frame: Frame):
         pass
@@ -57,8 +62,10 @@ async def run():
     client = AioStomp("127.0.0.1", 61613)
     await client.connect(username="admin", password="admin")
     client.subscribe("/queue/channel")
-    l = Listener()
+    l = Listener(0)
+    l1 = Listener(1)
     client.set_listener("abc", l)
+    client.set_listener("abc1", l1)
     # await send(client)
 
 

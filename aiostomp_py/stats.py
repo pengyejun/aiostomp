@@ -1,13 +1,13 @@
 import asyncio
+import os
 from typing import Dict, List
-from .config import AIOSTOMP_STATS_INTERVAL
 from .log import logger
 
 
 class AioStompStats:
     def __init__(self) -> None:
         self.connection_count = 0
-        self.interval = AIOSTOMP_STATS_INTERVAL
+        self.interval = int(os.environ.get("AIOSTOMP_STATS_INTERVAL", 10))
         self.connection_stats: List[Dict[str, int]] = []
 
     def print_stats(self) -> None:

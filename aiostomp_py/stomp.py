@@ -1,11 +1,11 @@
 import asyncio
+import os
 from typing import Dict, Optional, Any, Union
 from ssl import SSLContext
 
 from .base import ConnectionListener, Publisher
 from .stats import AioStompStats
 from .subscription import Subscription
-from .config import AIOSTOMP_ENABLE_STATS
 from .log import logger
 from .frame import Frame
 from .protocol import StompProtocol
@@ -27,7 +27,6 @@ class AioStomp(Publisher):
         auto_decode: bool = True,
         loop: Optional[asyncio.AbstractEventLoop] = None,
     ):
-
         self._heartbeat = {
             "enabled": heartbeat,
             "cx": heartbeat_interval_cx,
@@ -39,8 +38,8 @@ class AioStomp(Publisher):
         self._loop = loop or asyncio.get_event_loop()
 
         self._stats = None
-
-        if AIOSTOMP_ENABLE_STATS:
+        self.enable_stats = bool(os.environ.get("AIOSTOMP_ENABLE_STATS", False))
+        if self.enable_stats:
             self._stats = AioStompStats()
             self._stats_handler = self._loop.create_task(self._stats.run())
         self._subscriptions: Dict[str, Subscription] = {}
@@ -137,7 +136,7 @@ class AioStomp(Publisher):
         self._connected = False
         self._protocol.close()
 
-        if AIOSTOMP_ENABLE_STATS:
+        if self.enable_stats:
             self._stats_handler.cancel()
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
@@ -163,7 +162,7 @@ class AioStomp(Publisher):
 
         subscription = Subscription(
             destination=destination,
-            id=self._last_subscribe_id,
+            _id=self._last_subscribe_id,
             ack=ack,
             extra_headers=extra_headers,
             auto_ack=auto_ack,
