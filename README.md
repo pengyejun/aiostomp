@@ -6,7 +6,7 @@
 with pip:
 
 ```bash
-pip install aiostomp-py
+pip install aiopystomp 
 ```
 ## Usage
 ```python
