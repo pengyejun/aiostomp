@@ -3,11 +3,11 @@ import uvloop
 import logging
 import asyncio
 
-from aiostomp_py.frame import Frame
+from aiopystomp.frame import Frame
 
-from aiostomp_py import AioStomp
+from aiopystomp import AioStomp
 
-from aiostomp_py.base import ConnectionListener
+from aiopystomp.base import ConnectionListener
 
 
 os.environ["AIOSTOMP_ENABLE_STATS"] = "1"

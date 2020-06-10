@@ -1,5 +1,5 @@
 [tool.poetry]
-name = "aiostomp-py"
+name = "aiopystomp"
 version = "0.1.0"
 description = ""
 authors = ["pengyj <p15281826276@gmail.com>"]
