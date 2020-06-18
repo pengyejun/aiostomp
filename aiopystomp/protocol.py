@@ -61,6 +61,7 @@ class StompProtocol(StompBaseProtocol, Publisher):
             loop=self._loop,
             heartbeat=self._heartbeat,
             stats=self._stats,
+            auto_decode=self.auto_decode,
         )
 
         trans, proto = await self._loop.create_connection(
@@ -174,9 +175,7 @@ class BaseProtocol(asyncio.Protocol):
             self._connect_headers["client-id"] = f"{client_id}-{unique_id}"
 
         if self.heartbeat.get("enabled"):
-            self._connect_headers[HDR_HEARTBEAT] = "{},{}".format(
-                self.heartbeat.get("cx", 0), self.heartbeat.get("cy", 0)
-            )
+            self._connect_headers[HDR_HEARTBEAT] = f"{self.heartbeat['heartbeat'][0]},{self.heartbeat['heartbeat'][1]}"
 
         if username is not None:
             self._connect_headers[HDR_LOGIN] = username
@@ -235,11 +234,10 @@ class BaseProtocol(asyncio.Protocol):
     async def _handle_connect(self, frame: Frame) -> None:
         if self._transport is None:
             return
-        heartbeat = frame.headers.get("heart-beat")
+        heartbeat = frame.headers.get(HDR_HEARTBEAT)
         logger.debug("Expecting heartbeats: %s", heartbeat)
         if heartbeat and self.heartbeat.get("enabled"):
             sx, sy = (int(x) for x in heartbeat.split(","))
-
             if sy:
                 interval = max(self.heartbeat.get("cx", 0), sy)
                 logger.debug("Sending heartbeats every %sms", interval)

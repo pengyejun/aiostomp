@@ -30,10 +30,9 @@ class AmqProtocol(BaseProtocol):
             return
 
         if data == self.HEART_BEAT:
-            return
+            data += self.EOF
+
         self._recvbuf += data
-        if self.EOF not in data:
-            return
         self.consume_data()
 
     def consume_data(self):
