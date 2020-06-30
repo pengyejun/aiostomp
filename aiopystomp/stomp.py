@@ -146,6 +146,7 @@ class AioStomp(Publisher):
 
         if not self._is_retrying:
             logger.info("Connection lost, will retry.")
+            self._is_retrying = True
             self._loop.call_soon(lambda: asyncio.ensure_future(self._reconnect(), loop=self._loop))
             # asyncio.ensure_future(self._reconnect(), loop=self._loop)
 
