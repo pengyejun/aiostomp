@@ -146,7 +146,8 @@ class AioStomp(Publisher):
 
         if not self._is_retrying:
             logger.info("Connection lost, will retry.")
-            asyncio.ensure_future(self._reconnect(), loop=self._loop)
+            self._loop.call_soon(lambda: asyncio.ensure_future(self._reconnect(), loop=self._loop))
+            # asyncio.ensure_future(self._reconnect(), loop=self._loop)
 
     def subscribe(
         self,
@@ -198,6 +199,10 @@ class AioStomp(Publisher):
             headers["content-length"] = len(body_b)
 
         self._protocol.send(headers, body_b)
+
+    @property
+    def transport(self):
+        return self._protocol.transport
 
     def _subscription_auto_ack(self, frame: Frame) -> bool:
         key = frame.headers.get("subscription", "")

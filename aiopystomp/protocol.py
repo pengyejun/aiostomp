@@ -101,6 +101,10 @@ class StompProtocol(StompBaseProtocol, Publisher):
             raise RuntimeError("Not connected")
         self._protocol.send_frame(CMD_SEND, headers, body)
 
+    @property
+    def transport(self):
+        return self._protocol.transport
+
     def ack(self, frame: Frame) -> None:
         if self._protocol is None:
             raise RuntimeError("Not connected")
@@ -194,11 +198,7 @@ class BaseProtocol(asyncio.Protocol):
             self.heartbeater = None
 
     def connect(self) -> None:
-        buf = self._protocol.build_frame(
-            CMD_CONNECT, headers=self._connect_headers)
-        if not self._transport:
-            raise StompDisconnectedError()
-        self._transport.write(buf)
+        self.send_frame(CMD_CONNECT, self._connect_headers)
 
     def send_frame(self, command: str, headers: Optional[Dict[str, Any]] = None,
                    body: Union[str, bytes] = b"",) -> None:
@@ -211,14 +211,16 @@ class BaseProtocol(asyncio.Protocol):
 
         if self._stats:
             self._stats.increment("sent_msg")
-
         self._transport.write(buf)
 
     def connection_made(self, transport: asyncio.Transport) -> None:
         logger.info("Connected")
         self._transport = transport
-
         self.connect()
+
+    @property
+    def transport(self):
+        return self._transport
 
     def connection_lost(self, exc: Optional[Exception]) -> None:
         logger.debug("connection lost")
